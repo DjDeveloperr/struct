@@ -29,12 +29,12 @@ export type MapBaseFieldType<F extends FieldType> = F extends "u8" ? number
   : F extends "i16" ? number
   : F extends "u32" ? number
   : F extends "i32" ? number
-  : F extends "u64" ? bigint
-  : F extends "i64" ? bigint
+  : F extends "u64" ? Deno.PointerValue
+  : F extends "i64" ? Deno.PointerValue
   : F extends "f32" ? number
   : F extends "f64" ? number
   : F extends "bool" ? boolean
-  : F extends "ptr" ? Deno.UnsafePointer
+  : F extends "ptr" ? Deno.PointerValue
   : never;
 
 export type MapArrayFieldType<F extends FieldType> = F extends `u8[${number}]`
@@ -99,13 +99,63 @@ export function computeFieldSize(field: FieldType): number {
   }
 }
 
-export function computeStructSize(layout: Layout): number {
-  let size = 0;
-  for (const [, field] of Object.entries(layout)) {
-    const fieldSize = computeFieldSize(field);
-    size += fieldSize;
+export function computeFieldAlign(field: FieldType): number {
+  switch (field) {
+    case "u8":
+    case "i8":
+    case "bool":
+      return 1;
+    case "u16":
+    case "i16":
+      return 2;
+    case "u32":
+    case "i32":
+    case "f32":
+      return 4;
+    case "u64":
+    case "i64":
+    case "f64":
+    case "ptr":
+      return 8;
+    default:
+      if (ARRAY_FIELD_TYPE_REGEX.test(field)) {
+        const [, type] = field.match(ARRAY_FIELD_TYPE_REGEX)!;
+        return computeFieldAlign(type as BaseFieldType);
+      } else {
+        throw new TypeError(`Invalid field type: ${field}`);
+      }
   }
-  return size;
+}
+
+export interface PaddedStructField {
+  name: string;
+  type: FieldType;
+  size: number;
+  offset: number;
+}
+
+export interface PaddedStructLayout {
+  size: number;
+  fields: PaddedStructField[];
+}
+
+export function padStructLayout(layout: Layout): PaddedStructLayout {
+  let offset = 0;
+  let align = 0;
+  const fields: PaddedStructField[] = [];
+  for (const [name, field] of Object.entries(layout)) {
+    const fieldSize = computeFieldSize(field);
+    const alignSize = computeFieldAlign(field);
+    align = Math.max(align, alignSize);
+    offset = Math.ceil(offset / alignSize) * alignSize;
+    fields.push({ name, type: field, offset, size: fieldSize });
+    offset += fieldSize;
+  }
+  offset = Math.ceil(offset / align) * align;
+  return {
+    size: offset,
+    fields,
+  };
 }
 
 export const LITTLE_ENDIAN =
@@ -132,15 +182,15 @@ export function Struct<L extends Layout>(
   data?: ArrayBuffer,
   littleEndian = LITTLE_ENDIAN,
 ): Struct<L> {
-  const structSize = computeStructSize(layout);
+  const padded = padStructLayout(layout);
   if (data !== undefined) {
-    if (data.byteLength !== structSize) {
+    if (data.byteLength !== padded.size) {
       throw new RangeError(
-        `Invalid data size: ${data.byteLength}, expected to be ${structSize}`,
+        `Invalid data size: ${data.byteLength}, expected to be ${padded.size}`,
       );
     }
   } else {
-    data = new ArrayBuffer(structSize);
+    data = new ArrayBuffer(padded.size);
   }
 
   const struct = {};
@@ -160,159 +210,159 @@ export function Struct<L extends Layout>(
     value: littleEndian,
   });
 
-  let offset = 0;
-  for (const [name, field] of Object.entries(layout)) {
-    const fieldSize = computeFieldSize(field);
-    const currentOffset = offset;
-
-    Object.defineProperty(struct, name, {
+  for (const field of padded.fields) {
+    Object.defineProperty(struct, field.name, {
       get(this: Struct<L>) {
-        switch (field) {
+        switch (field.type) {
           case "u8":
-            return this._bufferView.getUint8(currentOffset);
+            return this._bufferView.getUint8(field.offset);
           case "i8":
-            return this._bufferView.getInt8(currentOffset);
+            return this._bufferView.getInt8(field.offset);
           case "u16":
             return this._bufferView.getUint16(
-              currentOffset,
+              field.offset,
               this._littleEndian,
             );
           case "i16":
-            return this._bufferView.getInt16(currentOffset, this._littleEndian);
+            return this._bufferView.getInt16(field.offset, this._littleEndian);
           case "u32":
             return this._bufferView.getUint32(
-              currentOffset,
+              field.offset,
               this._littleEndian,
             );
           case "i32":
-            return this._bufferView.getInt32(currentOffset, this._littleEndian);
+            return this._bufferView.getInt32(field.offset, this._littleEndian);
           case "u64":
             return this._bufferView.getBigUint64(
-              currentOffset,
+              field.offset,
               this._littleEndian,
             );
           case "i64":
             return this._bufferView.getBigInt64(
-              currentOffset,
+              field.offset,
               this._littleEndian,
             );
           case "f32":
             return this._bufferView.getFloat32(
-              currentOffset,
+              field.offset,
               this._littleEndian,
             );
           case "f64":
             return this._bufferView.getFloat64(
-              currentOffset,
+              field.offset,
               this._littleEndian,
             );
           case "bool":
-            return this._bufferView.getUint8(currentOffset) !== 0;
+            return this._bufferView.getUint8(field.offset) !== 0;
           case "ptr":
-            return new Deno.UnsafePointer(
-              this._bufferView.getBigUint64(currentOffset, this._littleEndian),
+            return this._bufferView.getBigUint64(
+              field.offset,
+              this._littleEndian,
             );
           default:
-            if (ARRAY_FIELD_TYPE_REGEX.test(field)) {
-              const [, type, length] = field.match(ARRAY_FIELD_TYPE_REGEX)!;
+            if (ARRAY_FIELD_TYPE_REGEX.test(field.type)) {
+              const [, type, length] = field.type.match(
+                ARRAY_FIELD_TYPE_REGEX,
+              )!;
               const TypedArray = mapTypedArray(type as BaseFieldType);
               return new TypedArray(
                 this._buffer,
-                currentOffset,
+                field.offset,
                 parseInt(length),
               );
             } else {
               throw new TypeError(
-                `Invalid field type: ${field} (at offset ${currentOffset})`,
+                `Invalid field type: ${field} (at offset ${field.offset})`,
               );
             }
         }
       },
       set(this: Struct<L>, value) {
-        switch (field) {
+        switch (field.type) {
           case "u8":
-            this._bufferView.setUint8(currentOffset, value);
+            this._bufferView.setUint8(field.offset, value);
             break;
           case "i8":
-            this._bufferView.setInt8(currentOffset, value);
+            this._bufferView.setInt8(field.offset, value);
             break;
           case "u16":
             this._bufferView.setUint16(
-              currentOffset,
+              field.offset,
               value,
               this._littleEndian,
             );
             break;
           case "i16":
             this._bufferView.setInt16(
-              currentOffset,
+              field.offset,
               value,
               this._littleEndian,
             );
             break;
           case "u32":
             this._bufferView.setUint32(
-              currentOffset,
+              field.offset,
               value,
               this._littleEndian,
             );
             break;
           case "i32":
             this._bufferView.setInt32(
-              currentOffset,
+              field.offset,
               value,
               this._littleEndian,
             );
             break;
           case "u64":
             this._bufferView.setBigUint64(
-              currentOffset,
-              value,
+              field.offset,
+              BigInt(value),
               this._littleEndian,
             );
             break;
           case "i64":
             this._bufferView.setBigInt64(
-              currentOffset,
-              value,
+              field.offset,
+              BigInt(value),
               this._littleEndian,
             );
             break;
           case "f32":
             this._bufferView.setFloat32(
-              currentOffset,
+              field.offset,
               value,
               this._littleEndian,
             );
             break;
           case "f64":
             this._bufferView.setFloat64(
-              currentOffset,
+              field.offset,
               value,
               this._littleEndian,
             );
             break;
           case "bool":
-            this._bufferView.setUint8(currentOffset, value ? 1 : 0);
+            this._bufferView.setUint8(field.offset, value ? 1 : 0);
             break;
           case "ptr":
             if (
-              typeof value !== "bigint" &&
-              !(value instanceof Deno.UnsafePointer)
+              typeof value !== "bigint" && typeof value !== "number"
             ) {
               throw new TypeError(
                 `Invalid value type: ${typeof value}, expected to be bigint or UnsafePointer`,
               );
             }
             this._bufferView.setBigUint64(
-              currentOffset,
-              value.valueOf(),
+              field.offset,
+              BigInt(value),
               this._littleEndian,
             );
             break;
           default:
-            if (ARRAY_FIELD_TYPE_REGEX.test(field)) {
-              const [, type, length] = field.match(ARRAY_FIELD_TYPE_REGEX)!;
+            if (ARRAY_FIELD_TYPE_REGEX.test(field.type)) {
+              const [, type, length] = field.type.match(
+                ARRAY_FIELD_TYPE_REGEX,
+              )!;
               const TypedArray = mapTypedArray(type as BaseFieldType);
               if (value instanceof TypedArray) {
                 if (value.length !== parseInt(length)) {
@@ -326,44 +376,43 @@ export function Struct<L extends Layout>(
                 }
                 new Uint8Array(this._buffer).set(
                   new Uint8Array(value.buffer),
-                  currentOffset,
+                  field.offset,
                 );
               } else {
                 throw new TypeError(
-                  `Invalid array type: ${value.constructor.name} (at offset ${currentOffset})`,
+                  `Invalid array type: ${value.constructor.name} (at offset ${field.offset})`,
                 );
               }
             } else {
               throw new TypeError(
-                `Invalid field type: ${field} (at offset ${currentOffset})`,
+                `Invalid field type: ${field} (at offset ${field.offset})`,
               );
             }
         }
       },
     });
-
-    offset += fieldSize;
   }
 
   (struct as any)[Symbol.for("Deno.customInspect")] = function (
     this: Struct<L>,
   ) {
-    let offset = 0;
     return `Struct(0x${
       this._buffer.byteLength.toString(16).padStart(2, "0")
     }) {\n${
-      Object.entries(layout).map(([field, type]) => {
-        const value = this[field];
-        const fmt = `  [0x${offset.toString(16).padStart(2, "0")}] ${field}: ${
-          value instanceof Deno.UnsafePointer
-            ? (value.value === 0n
+      padded.fields.map((field) => {
+        const value = this[field.name];
+        const fmt = `  [0x${
+          field.offset.toString(16).padStart(2, "0")
+        }] ${field.name}: ${
+          field.type === "ptr" &&
+            (typeof value === "bigint" || typeof value === "number")
+            ? (value === 0n
               ? "nullptr"
-              : `*0x${value.value.toString(16).padStart(16, "0")}`)
+              : `*0x${value.toString(16).padStart(16, "0")}`)
             : Deno.inspect(value, { colors: !Deno.noColor }).split("\n").map(
               (e) => "  " + e,
             ).join("\n").trimStart()
         }`;
-        offset += computeFieldSize(type);
         return fmt;
       }).join("\n")
     }\n}`;
