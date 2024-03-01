@@ -158,7 +158,7 @@ export function padStructLayout(layout: Layout): PaddedStructLayout {
   };
 }
 
-export const LITTLE_ENDIAN =
+export const LITTLE_ENDIAN: boolean =
   new Uint8Array(new Uint32Array([0x12345678]).buffer)[0] === 0x78;
 
 export const mapTypedArray = (type: BaseFieldType) =>
@@ -393,6 +393,7 @@ export function Struct<L extends Layout>(
     });
   }
 
+  // deno-lint-ignore no-explicit-any
   (struct as any)[Symbol.for("Deno.customInspect")] = function (
     this: Struct<L>,
   ) {
@@ -406,7 +407,7 @@ export function Struct<L extends Layout>(
         }] ${field.name}: ${
           field.type === "ptr" &&
             (typeof value === "bigint" || typeof value === "number")
-            ? (value === 0n
+            ? (value === 0
               ? "nullptr"
               : `*0x${value.toString(16).padStart(16, "0")}`)
             : Deno.inspect(value, { colors: !Deno.noColor }).split("\n").map(
